@@ -1,0 +1,32 @@
+parameter,value
+size_x_mm,100.0
+size_y_mm,100.0
+size_z_mm,100.0
+raster_shape,"(100, 100, 100)"
+fiber_radius_mm,3.5
+actual_volume_fraction_%,51.98729121985725
+target_volume_fraction_%,52.0
+mean_raster_density,0.558266341686249
+min_raster_density,0.0
+max_raster_density,1.0
+matrix_E_MPa,2600.0
+matrix_nu,0.35
+matrix_density,1.24e-09
+matrix_plastic_data,"((70.0, 0.0), (72.0, 0.05), (75.0, 0.1), (80.0, 0.2), (90.0, 0.4))"
+matrix_ductile_damage_data,"((0.05, 0.33, 1.0),)"
+matrix_damage_accumulation_power,0.0
+matrix_fracture_energy_GJm2,2.0
+fiber_density,1.8e-09
+fiber_E1_MPa,230000.0
+fiber_E2_MPa,15000.0
+fiber_E3_MPa,15000.0
+fiber_nu12,0.2
+fiber_nu13,0.2
+fiber_nu23,0.49
+fiber_G12_MPa,24000.0
+fiber_G13_MPa,24000.0
+fiber_G23_MPa,5030.0
+fiber_tensile_strength_MPa,4900.0
+fiber_compressive_strength_MPa,1400.0
+fiber_transverse_strength_MPa,50.0
+fiber_fracture_energy_GJm2,0.12

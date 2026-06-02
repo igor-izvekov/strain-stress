@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Кривая «напряжение-деформация»</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1"></script>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --bg: #f8fafc;
+            --card: #ffffff;
+            --text: #1e293b;
+            --text-muted: #64748b;
+            --border: #e2e8f0;
+            --shadow: 0 1px 3px rgba(0,0,0,0.1);
+
+            --btn-bg: #e0e0e0;
+            --btn-text: #000000;
+            --btn-border: #adadad;
+            --btn-hover: #d4d4d4;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.5;
+            padding: 24px 16px;
+            font-size: 18px;
+        }
+
+        .app {
+            max-width: 960px;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+
+        header {
+            text-align: center;
+            padding: 16px 0;
+        }
+
+        header h1 {
+            font-size: 2rem;
+            font-weight: 700;
+            color: var(--text);
+            margin-bottom: 4px;
+        }
+
+        header p {
+            color: var(--text-muted);
+            font-size: 1.1rem;
+        }
+
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: var(--shadow);
+            text-align: center;
+        }
+
+        .card-title {
+            font-size: 1.3rem;
+            font-weight: 600;
+            margin-bottom: 20px;
+            padding-bottom: 12px;
+            border-bottom: 2px solid var(--bg);
+            text-align: center;
+        }
+
+        .input-row {
+            margin-bottom: 20px;
+            max-width: 400px;
+            margin-left: auto;
+            margin-right: auto;
+            text-align: center;
+        }
+
+        label {
+            display: block;
+            font-weight: 500;
+            margin-bottom: 8px;
+            font-size: 1rem;
+            text-align: center;
+        }
+
+        input[type="number"] {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            font-size: 1.4rem;
+            text-align: center;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        input[type="number"]:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+        }
+
+        input[type="file"] {
+            width: 100%;
+            padding: 12px;
+            border: 2px dashed var(--border);
+            border-radius: 8px;
+            background: #f8fafc;
+            cursor: pointer;
+            font-size: 1rem;
+            transition: border-color 0.2s;
+            text-align: center;
+        }
+
+        input[type="file"]:hover {
+            border-color: var(--primary);
+        }
+
+        .btn {
+            width: 300px;
+            padding: 10px 20px;
+            background-color: var(--btn-bg);
+            color: var(--btn-text);
+            border: 1px solid var(--btn-border);
+            border-radius: 4px;
+            font-size: 1.1rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.2s;
+            margin-top: 10px;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.5); 
+        }
+
+        .btn:hover { 
+            background: var(--btn-hover); 
+        }
+        
+        .btn:disabled {
+            background: #cccccc;
+            color: #666666;
+            cursor: not-allowed;
+        }
+
+        .divider {
+            display: flex;
+            align-items: center;
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 1rem;
+            margin: 8px 0;
+        }
+
+        .divider::before,
+        .divider::after {
+            content: '';
+            flex: 1;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .divider span {
+            padding: 0 12px;
+            font-weight: 500;
+        }
+
+        .loader {
+            display: none;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .spinner {
+            width: 36px;
+            height: 36px;
+            border: 3px solid var(--border);
+            border-top-color: var(--primary);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 12px;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .error-box {
+            display: none;
+            background: #fef2f2;
+            border: 1px solid #fecaca;
+            color: #ef4444;
+            padding: 12px 16px;
+            border-radius: 8px;
+            font-size: 1rem;
+            margin: 12px 0;
+            text-align: center;
+        }
+
+        .results {
+            display: none;
+            animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .chart-wrapper {
+            position: relative;
+            height: 450px;
+            width: 100%;
+            margin-bottom: 20px;
+            background: #fff;
+        }
+
+        .download-btn {
+            display: inline-block;
+            width: 300px;
+            padding: 10px 20px;
+            background-color: var(--btn-bg);
+            color: var(--btn-text);
+            text-decoration: none;
+            border: 1px solid var(--btn-border);
+            border-radius: 4px;
+            font-weight: 500;
+            font-size: 1.1rem;
+            margin: 0 auto;
+            transition: background 0.2s;
+            text-align: center;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.5);
+        }
+
+        .download-btn:hover { background: var(--btn-hover); }
+
+        .meta-info {
+            display: flex;
+            justify-content: center;
+            gap: 24px;
+            margin-bottom: 20px;
+            font-size: 1.1rem;
+            color: var(--text-muted);
+            flex-wrap: wrap;
+            text-align: center;
+        }
+
+        .meta-info span strong {
+            color: var(--text);
+            font-weight: 600;
+            font-size: 1.2rem;
+        }
+
+        .uncertainty-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            background: #f59e0b;
+            color: white;
+            border-radius: 12px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            margin-left: 8px;
+            vertical-align: middle;
+        }
+
+        @media (max-width: 640px) {
+            .app { padding: 12px; }
+            .card { padding: 20px; }
+            header h1 { font-size: 1.6rem; }
+            .chart-wrapper { height: 350px; }
+            .meta-info { gap: 12px; font-size: 1rem; }
+            .btn, .download-btn { width: 100%; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="app">
+    <header>
+        <h1>Кривая «напряжение-деформация»</h1>
+    </header>
+
+    <div class="card">
+        <div class="card-title">Способ 1: Расчёт по объёмной доле (Vf)</div>
+        <div class="input-row">
+            <label for="vf_input">Объёмная доля волокна, %</label>
+            <input type="number" id="vf_input" min="50" max="70" value="60" step="1" placeholder="50–70">
+        </div>
+        <button class="btn" id="btn-vf" onclick="runPrediction('vf')">Рассчитать по Vf</button>
+    </div>
+
+    <div class="divider"><span>ИЛИ</span></div>
+
+    <div class="card">
+        <div class="card-title">Способ 2: Загрузка срезов (ось YZ)</div>
+        <div class="input-row">
+            <label for="slice_a">Срез A (входной)</label>
+            <input type="file" id="slice_a" accept="image/png,image/jpeg,image/jpg">
+        </div>
+        <div class="input-row">
+            <label for="slice_b">Срез B (выходной)</label>
+            <input type="file" id="slice_b" accept="image/png,image/jpeg,image/jpg">
+        </div>
+        <button class="btn" id="btn-img" onclick="runPrediction('img')">Рассчитать по изображениям</button>
+    </div>
+
+    <div class="loader" id="loader">
+        <div class="spinner"></div>
+        <div>Генерация RVE • Растеризация • Инференс CNN-GPR...</div>
+    </div>
+    <div class="error-box" id="error_msg"></div>
+
+    <div class="card results" id="results-section">
+        <div class="card-title">
+            Результат прогноза
+            <span id="uncertainty_badge" style="display:none; font-size:0.95rem">(UQ включено)</span>
+        </div>
+        
+        <div class="meta-info" id="meta_info"></div>
+        
+        <div class="chart-wrapper">
+            <canvas id="stressStrainChart"></canvas>
+        </div>
+        
+        <div style="text-align: center;">
+            <a id="csv_link" href="#" class="download-btn" download="strain_stress.csv">
+                Скачать CSV (Stress-Strain)
+            </a>
+        </div>
+    </div>
+</div>
+
+<script>
+const API_BASE = ''; 
+let chartInstance = null;
+
+window.addEventListener('DOMContentLoaded', () => {
+    if (location.protocol === 'file:') {
+        showConnectionError('Вы открыли файл локально (file://).<br>Пожалуйста, запустите сервер и откройте:<br><strong>http://localhost:8000/</strong>');
+    }
+});
+
+async function runPrediction(mode) {
+    const loader = document.getElementById('loader');
+    const results = document.getElementById('results-section');
+    const errorBox = document.getElementById('error_msg');
+    const btnVF = document.getElementById('btn-vf');
+    const btnIMG = document.getElementById('btn-img');
+    
+    loader.style.display = 'block';
+    results.style.display = 'none';
+    errorBox.style.display = 'none';
+    errorBox.textContent = '';
+    btnVF.disabled = true;
+    btnIMG.disabled = true;
+
+    const formData = new FormData();
+
+    try {
+        if (mode === 'vf') {
+            const vf = document.getElementById('vf_input').value.trim();
+            if (!vf) throw new Error('Введите значение объёмной доли');
+            const vfNum = parseFloat(vf);
+            if (isNaN(vfNum) || vfNum < 50 || vfNum > 70) {
+                throw new Error('Vf должно быть в диапазоне 50–70%');
+            }
+            formData.append('vf_target', vfNum);
+        } 
+        else if (mode === 'img') {
+            const fileA = document.getElementById('slice_a').files[0];
+            const fileB = document.getElementById('slice_b').files[0];
+            if (!fileA || !fileB) throw new Error('Выберите оба файла изображений');
+            formData.append('slice_a', fileA);
+            formData.append('slice_b', fileB);
+        }
+
+        const response = await fetch(`${API_BASE}/predict/`, {
+            method: 'POST',
+            body: formData,
+        });
+
+        if (!response.ok) {
+            let errMsg = `Ошибка сервера: ${response.status}`;
+            try {
+                const errData = await response.json();
+                if (errData.detail) errMsg = errData.detail;
+            } catch (_) {}
+            throw new Error(errMsg);
+        }
+
+        const data = await response.json();
+        renderResults(data);
+
+    } catch (error) {
+        console.error('Error:', error);
+        errorBox.innerHTML = error.message;
+        errorBox.style.display = 'block';
+    } finally {
+        loader.style.display = 'none';
+        btnVF.disabled = false;
+        btnIMG.disabled = false;
+    }
+}
+
+function renderResults(data) {
+    const results = document.getElementById('results-section');
+    const metaInfo = document.getElementById('meta_info');
+    const csvLink = document.getElementById('csv_link');
+    const uncertaintyBadge = document.getElementById('uncertainty_badge');
+    
+    csvLink.href = `${API_BASE}${data.curve_url}`;
+    
+    if (data.uncertainty) {
+        uncertaintyBadge.style.display = 'inline-block';
+    } else {
+        uncertaintyBadge.style.display = 'none';
+    }
+    
+    metaInfo.innerHTML = `
+        <span>Vf: <strong>${data.vf_used?.toFixed(1) || '—'}%</strong></span>
+        <span>Max Strength: <strong>${data.max_strength?.toLocaleString('ru-RU') || '—'} МПа</strong></span>
+        <span>A-Basis: <strong>${data.a_basis?.toLocaleString('ru-RU') || '—'} МПа</strong></span>
+        <span>B-Basis: <strong>${data.b_basis?.toLocaleString('ru-RU') || '—'} МПа</strong></span>
+    `;
+    
+    renderChart(data.strain, data.stress, data.stress_std);
+    
+    results.style.display = 'block';
+    results.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function renderChart(strainData, stressData, stdData = null) {
+    const canvas = document.getElementById('stressStrainChart');
+    const ctx = canvas.getContext('2d');
+    
+    if (chartInstance) {
+        chartInstance.destroy();
+    }
+    
+    const datasets = [
+        {
+            label: 'Прогноз',
+            data: stressData,
+            borderColor: '#2563eb',
+            backgroundColor: 'rgba(37, 99, 235, 0.08)',
+            borderWidth: 2.5,
+            pointRadius: 0,
+            pointHoverRadius: 4,
+            fill: true,
+            tension: 0.15,
+            cubicInterpolationMode: 'monotone'
+        }
+    ];
+    
+    if (stdData && stdData.length === stressData.length) {
+        const upper = stressData.map((v, i) => v + stdData[i]);
+        const lower = stressData.map((v, i) => Math.max(0, v - stdData[i]));
+        
+        datasets.push(
+            {
+                label: '+1σ',
+                data: upper,
+                borderColor: 'rgba(37, 99, 235, 0.25)',
+                borderWidth: 1,
+                pointRadius: 0,
+                fill: false,
+                showLine: true
+            },
+            {
+                label: '−1σ',
+                data: lower,
+                borderColor: 'rgba(37, 99, 235, 0.25)',
+                borderWidth: 1,
+                pointRadius: 0,
+                fill: '+1',
+                backgroundColor: 'rgba(37, 99, 235, 0.12)'
+            }
+        );
+    }
+    
+    Chart.defaults.font.size = 14;
+    Chart.defaults.font.family = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+
+    chartInstance = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: strainData,
+            datasets: datasets
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: { duration: 400, easing: 'easeOutQuart' },
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    mode: 'index',
+                    intersect: false,
+                    backgroundColor: 'rgba(30, 41, 59, 0.95)',
+                    titleFont: { size: 16 },
+                    bodyFont: { size: 14 },
+                    padding: 10,
+                    displayColors: false,
+                    callbacks: {
+                        label: (ctx) => `σ = ${ctx.parsed.y.toFixed(1)} МПа`
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    type: 'linear',
+                    title: { 
+                        display: true, 
+                        text: 'Деформация (ε)', 
+                        font: { weight: '600', size: 16 }
+                    },
+                    grid: { color: 'rgba(226, 232, 240, 0.6)' },
+                    ticks: { font: { size: 14 } }
+                },
+                y: {
+                    title: { 
+                        display: true, 
+                        text: 'Напряжение (σ), МПа', 
+                        font: { weight: '600', size: 16 }
+                    },
+                    grid: { color: 'rgba(226, 232, 240, 0.6)' },
+                    ticks: { font: { size: 14 } },
+                    beginAtZero: true
+                }
+            },
+            interaction: {
+                mode: 'nearest',
+                axis: 'x',
+                intersect: false
+            }
+        }
+    });
+}
+
+function showConnectionError(message) {
+    document.body.innerHTML = `
+        <div style="max-width:520px;margin:60px auto;padding:28px;background:#fef2f2;border:1px solid #fecaca;border-radius:12px;font-family:system-ui;text-align:center">
+            <h2 style="color:#b91c1c;margin-bottom:8px">Сервер не подключён</h2>
+            <p style="color:#64748b;margin-bottom:16px">${message}</p>
+            <ol style="text-align:left;background:white;padding:16px 20px;border-radius:8px;margin:16px 0;font-size:0.95rem">
+                <li>Запустите сервер: <code>python main.py</code></li>
+                <li>Убедитесь, что порт 8000 свободен</li>
+                <li>Откройте в браузере: <strong>http://localhost:8000/</strong></li>
+            </ol>
+            <button onclick="location.reload()" style="padding:10px 24px;background:#e0e0e0;color:black;border:1px solid #adadad;border-radius:4px;cursor:pointer;font-weight:500;width:300px">Обновить</button>
+        </div>`;
+}
+</script>
+
+</body>
+</html>
