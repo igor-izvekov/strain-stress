@@ -11,7 +11,6 @@ from PIL import Image
 from fastapi import FastAPI, Form, File, UploadFile, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 try:
@@ -21,6 +20,7 @@ try:
     from sklearn.preprocessing import StandardScaler
     import joblib
     from scipy.interpolate import interp1d
+    from scipy import ndimage
     ML_AVAILABLE = True
 except ImportError:
     ML_AVAILABLE = False
@@ -101,9 +101,34 @@ class Fiber:
         self.half_len = self.length / 2.0
         self.p1 = self.center - self.half_len * self.dir
         self.p2 = self.center + self.half_len * self.dir
+        
+    @classmethod
+    def from_endpoints(cls, p1, p2, radius):
+        """Создание волокна по двум конечным точкам (для соединения срезов)."""
+        p1 = np.array(p1, dtype=float)
+        p2 = np.array(p2, dtype=float)
+        center = (p1 + p2) / 2.0
+        direction = p2 - p1
+        length = np.linalg.norm(direction)
+        if length < 1e-6:
+            dir_norm = np.array([0.0, 0.0, 1.0])
+        else:
+            dir_norm = direction / length
+            
+        obj = cls.__new__(cls)
+        obj.center = center
+        obj.radius = radius
+        obj.dir = dir_norm
+        obj.length = length
+        obj.half_len = length / 2.0
+        obj.p1 = p1
+        obj.p2 = p2
+        return obj
+
     def update_endpoints(self):
         self.p1 = self.center - self.half_len * self.dir
         self.p2 = self.center + self.half_len * self.dir
+        
     def check_collision(self, other, tol=1e-4):
         if np.linalg.norm(self.center - other.center) > self.length + other.length + 2*self.radius:
             return False
@@ -153,6 +178,7 @@ class FiberGenerator:
         self.radius, self.target_vf = radius, target_vf/100.0
         self.max_pol, self.az_var = max_pol, az_var
         self.spacing = 2 * radius * 1.005
+        
     def _hex_positions(self, jitter=0.0):
         pos, dx = [], self.spacing
         dy = dx * math.sqrt(3) / 2.0
@@ -167,6 +193,7 @@ class FiberGenerator:
                 if self.radius <= jx <= SIZE_X-self.radius and self.radius <= jy <= SIZE_Y-self.radius:
                     pos.append((jx, jy))
         return pos
+        
     def generate(self):
         n_req = max(1, int(round(self.target_vf * SIZE_X*SIZE_Y / (math.pi * self.radius**2))))
         pos = []
@@ -178,12 +205,14 @@ class FiberGenerator:
         else:
             pos = self._hex_positions(jitter=2.0)
             if len(pos) > n_req: pos = random.sample(pos, n_req)
+            
         fibers, base_az = [], random.uniform(0, 360)
         for cx, cy in pos:
             dist = min(cx, SIZE_X-cx, cy, SIZE_Y-cy)
             pol = 0.0 if dist < 2*self.radius else self.max_pol * min(1.0, (dist-2*self.radius)/(5*self.radius)) * random.uniform(0.8,1.2)
             az = (base_az + random.uniform(-self.az_var, self.az_var)) % 360
             fibers.append(Fiber([cx, cy, SIZE_Z/2], self.radius, pol, az))
+            
         resolve_collisions_fast(fibers, (0,SIZE_X,0,SIZE_Y), self.radius)
         total_vol = sum(math.pi * f.radius**2 * f.length for f in fibers)
         actual_vf = (total_vol / (SIZE_X*SIZE_Y*SIZE_Z)) * 100
@@ -215,7 +244,68 @@ def rasterize_fibers_to_density_fast(fibers, shape, radius, size):
         density += val
     return np.clip(density, 0.0, 1.0)
 
-def run_inference(density_3d: np.ndarray, vf_target: float):
+def find_fiber_centers(image_path):
+    img = Image.open(image_path).convert('L')
+    arr = np.array(img)
+    
+    hist, _ = np.histogram(arr, bins=256, range=(0, 256))
+    total = arr.size
+    sum_total = np.sum(np.arange(256) * hist)
+    
+    sum_bg, weight_bg, max_variance, best_threshold = 0, 0, 0, 128
+    for i in range(256):
+        weight_bg += hist[i]
+        if weight_bg == 0: continue
+        weight_fg = total - weight_bg
+        if weight_fg == 0: break
+        sum_bg += i * hist[i]
+        mean_bg = sum_bg / weight_bg
+        mean_fg = (sum_total - sum_bg) / weight_fg
+        variance = weight_bg * weight_fg * (mean_bg - mean_fg) ** 2
+        if variance > max_variance:
+            max_variance = variance
+            best_threshold = i
+            
+    binary_light = arr > best_threshold
+    binary_dark = arr <= best_threshold
+    binary = binary_light if np.sum(binary_light) < np.sum(binary_dark) else binary_dark
+    
+    binary = ndimage.binary_opening(binary, structure=np.ones((2, 2)))
+    
+    labeled, num_features = ndimage.label(binary)
+    centers = []
+    h, w = arr.shape
+    min_area, max_area = 5, h * w * 0.2
+    
+    binary_arr = binary.astype(int)
+    for i in range(1, num_features + 1):
+        area = np.sum(labeled == i)
+        if min_area < area < max_area:
+            cy, cx = ndimage.center_of_mass(binary_arr, labeled, i)
+            phys_x = (cx / w) * SIZE_X
+            phys_y = (cy / h) * SIZE_Y
+            centers.append((phys_x, phys_y))
+            
+    return centers
+
+def match_centers(centers_a, centers_b):
+    """Жадное сопоставление центров между двумя срезами по минимальному расстоянию."""
+    dists = []
+    for i, (xa, ya) in enumerate(centers_a):
+        for j, (xb, yb) in enumerate(centers_b):
+            dist = math.hypot(xa - xb, ya - yb)
+            dists.append((dist, i, j))
+    dists.sort()
+    
+    pairs, used_a, used_b = [], set(), set()
+    for dist, i, j in dists:
+        if i not in used_a and j not in used_b:
+            pairs.append((centers_a[i], centers_b[j]))
+            used_a.add(i)
+            used_b.add(j)
+    return pairs
+
+def run_inference(density_3d: np.ndarray, vf_target: float, n_samples: int = None):
     if not ML_AVAILABLE or hybrid_model is None:
         return predict_properties_fallback(vf_target)
     try:
@@ -225,28 +315,48 @@ def run_inference(density_3d: np.ndarray, vf_target: float):
         latent = m["cnn"].predict(X_rve, verbose=0)
         X_comb = np.hstack([latent, X_meta])
         X_scaled = m["scaler_feat"].transform(X_comb)
+        
         mean_curve, std_curve = [], []
         for gpr in m["gpr_heads"]:
             mu, std = gpr.predict(X_scaled, return_std=True)
             mean_curve.append(mu[0])
             std_curve.append(std[0])
+        
         mean_curve = np.array(mean_curve).reshape(1,-1)
         std_curve = np.array(std_curve).reshape(1,-1)
         mean_curve = m["scaler_tgt"].inverse_transform(mean_curve)[0]
         std_curve = std_curve[0] * m["scaler_tgt"].scale_
+        
         strain = np.linspace(0, 0.15, N_STRAIN_POINTS)
-        max_strength = float(np.max(mean_curve))
-        a_basis = max_strength * 0.84
-        b_basis = max_strength * 0.91
+        
+        max_idx = np.argmax(mean_curve)
+        mean_max = mean_curve[max_idx]
+        std_at_max = std_curve[max_idx]
+        
+        if n_samples is not None and n_samples < 100:
+            k_A = 2.5 + 10 / np.sqrt(n_samples)
+            k_B = 1.4 + 5 / np.sqrt(n_samples)
+        else:
+            k_A = 2.326
+            k_B = 1.282
+            
+        a_basis = max(0, mean_max - k_A * std_at_max)
+        b_basis = max(0, mean_max - k_B * std_at_max)
+        
         return {
             "strain": [float(f"{s:.6f}") for s in strain],
             "stress": [float(f"{t:.2f}") for t in mean_curve],
             "stress_std": [float(f"{s:.2f}") for s in std_curve],
-            "a_basis": round(a_basis, 2),
-            "b_basis": round(b_basis, 2),
-            "max_strength": float(np.max(mean_curve)),
+            "a_basis": round(float(a_basis), 2),
+            "b_basis": round(float(b_basis), 2),
+            "max_strength": round(float(mean_max), 2),
             "vf_used": vf_target,
-            "uncertainty": True
+            "uncertainty": True,
+            "k_factors": {"k_A": round(k_A, 3), "k_B": round(k_B, 3)},
+            "statistics": {
+                "mean_max": round(float(mean_max), 2),
+                "std_at_max": round(float(std_at_max), 2)
+            }
         }
     except Exception as e:
         return predict_properties_fallback(vf_target)
@@ -271,12 +381,12 @@ def predict_properties_fallback(vf_target: float):
         else:
             damage = 1 - np.exp(-(eps - strain_peak) / 0.025)
             stress[i] = sigma_ult * (1 - damage * 0.85) + sigma_ult * 0.15 * damage
-    
+            
     stress = np.maximum(stress + np.random.normal(0, sigma_ult*0.015, len(strain)), 0)
     stress = np.convolve(stress, np.ones(7)/7, mode='same')
     
     peak_idx = np.argmax(stress)
-    cutoff = min(len(stress), peak_idx + int(0.05 * len(stress)))
+    cutoff = min(len(stress), peak_idx + int(0.05 * len(strain)))
     strain, stress = strain[:cutoff], stress[:cutoff]
     
     if len(strain) < N_STRAIN_POINTS:
@@ -284,7 +394,7 @@ def predict_properties_fallback(vf_target: float):
         strain_new = np.linspace(0, 0.15, N_STRAIN_POINTS)
         stress = f(strain_new)
         strain = strain_new
-    
+        
     max_s = float(np.max(stress))
     return {
         "strain": [float(f"{s:.6f}") for s in strain],
@@ -307,28 +417,20 @@ async def root():
         return HTMLResponse(content=f.read())
 
 @app.post("/predict/")
-async def predict(vf_target: float = Form(None), slice_a: UploadFile = File(None), slice_b: UploadFile = File(None)):
+async def predict(vf_target: float = Form(60.0)):
+    """Эндпоинт 1: Генерация RVE и инференс по заданному объему волокна (Vf)."""
     job_id = str(uuid.uuid4())
     job_dir = os.path.join(TEMP_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
     try:
-        if vf_target is not None:
-            if not (50 <= vf_target <= 70):
-                raise HTTPException(400, "Vf должно быть 50–70%")
-            vf = vf_target
-        elif slice_a and slice_b and slice_a.filename and slice_b.filename:
-            for name, file in [("slice_a", slice_a), ("slice_b", slice_b)]:
-                with open(os.path.join(job_dir, f"{name}.png"), "wb") as f:
-                    f.write(await file.read())
-            vf = 60.0
-        else:
-            raise HTTPException(400, "Укажите Vf или загрузите два среза")
-        
-        gen = FiberGenerator(FIBER_RADIUS, vf, max_pol=3.0, az_var=15.0)
+        if not (50 <= vf_target <= 70):
+            raise HTTPException(400, "Vf должно быть 50–70%")
+            
+        gen = FiberGenerator(FIBER_RADIUS, vf_target, max_pol=3.0, az_var=15.0)
         fibers, actual_vf = gen.generate()
         if not fibers:
             raise HTTPException(500, "Не удалось сгенерировать волокна")
-        
+            
         density = rasterize_fibers_to_density_fast(fibers, CSV_SHAPE, FIBER_RADIUS, (SIZE_X, SIZE_Y, SIZE_Z))
         
         csv_dir = os.path.join(job_dir, "rve_csv")
@@ -340,8 +442,8 @@ async def predict(vf_target: float = Form(None), slice_a: UploadFile = File(None
                     writer.writerow([f"{v:.6f}" for v in row])
         with open(os.path.join(csv_dir, "metadata.json"), "w") as f:
             json.dump({"actual_vf_%": round(actual_vf,2), "fiber_count": len(fibers), "shape": list(CSV_SHAPE)}, f, indent=2)
-        
-        result = run_inference(density, vf)
+            
+        result = run_inference(density, vf_target)
         
         curve_path = os.path.join(job_dir, "curve.csv")
         with open(curve_path, "w", newline='', encoding='utf-8') as f:
@@ -349,8 +451,74 @@ async def predict(vf_target: float = Form(None), slice_a: UploadFile = File(None
             writer.writerow(["Strain", "Stress_MPa"])
             for s, t in zip(result["strain"], result["stress"]):
                 writer.writerow([f"{s:.6f}", f"{t:.2f}"])
-        
+                
         return JSONResponse(content={"curve_url": f"/file/{job_id}/curve.csv", "csv_dir_url": f"/file/{job_id}/rve_csv/", **result})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Внутренняя ошибка: {str(e)}")
+
+@app.post("/predict/from_slices/")
+async def predict_from_slices(slice_a: UploadFile = File(...), slice_b: UploadFile = File(...)):
+    """Эндпоинт 2: Генерация RVE по двум микроснимкам (начальный и конечный срезы)."""
+    job_id = str(uuid.uuid4())
+    job_dir = os.path.join(TEMP_DIR, job_id)
+    os.makedirs(job_dir, exist_ok=True)
+    
+    try:
+        path_a = os.path.join(job_dir, "slice_a.png")
+        path_b = os.path.join(job_dir, "slice_b.png")
+        with open(path_a, "wb") as f:
+            f.write(await slice_a.read())
+        with open(path_b, "wb") as f:
+            f.write(await slice_b.read())
+            
+        centers_a = find_fiber_centers(path_a)
+        centers_b = find_fiber_centers(path_b)
+        
+        if not centers_a or not centers_b:
+            raise HTTPException(400, "Не удалось найти центры волокон на одном или обоих срезах")
+            
+        pairs = match_centers(centers_a, centers_b)
+        if not pairs:
+            raise HTTPException(400, "Не удалось сопоставить центры волокон между срезами")
+            
+        fibers = []
+        for (xa, ya), (xb, yb) in pairs:
+            p1 = np.array([xa, ya, 0.0])
+            p2 = np.array([xb, yb, SIZE_Z])
+            fibers.append(Fiber.from_endpoints(p1, p2, FIBER_RADIUS))
+            
+        total_vol = sum(math.pi * f.radius**2 * f.length for f in fibers)
+        actual_vf = (total_vol / (SIZE_X * SIZE_Y * SIZE_Z)) * 100
+        
+        density = rasterize_fibers_to_density_fast(fibers, CSV_SHAPE, FIBER_RADIUS, (SIZE_X, SIZE_Y, SIZE_Z))
+        
+        csv_dir = os.path.join(job_dir, "rve_csv")
+        os.makedirs(csv_dir, exist_ok=True)
+        for z in range(CSV_SHAPE[2]):
+            with open(os.path.join(csv_dir, f"rve_layer_{z+1}.csv"), "w", newline='') as f:
+                writer = csv.writer(f)
+                for row in density[:, :, z]:
+                    writer.writerow([f"{v:.6f}" for v in row])
+        with open(os.path.join(csv_dir, "metadata.json"), "w") as f:
+            json.dump({"actual_vf_%": round(actual_vf, 2), "fiber_count": len(fibers), "shape": list(CSV_SHAPE)}, f, indent=2)
+            
+        result = run_inference(density, actual_vf)
+        
+        curve_path = os.path.join(job_dir, "curve.csv")
+        with open(curve_path, "w", newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(["Strain", "Stress_MPa"])
+            for s, t in zip(result["strain"], result["stress"]):
+                writer.writerow([f"{s:.6f}", f"{t:.2f}"])
+                
+        return JSONResponse(content={
+            "curve_url": f"/file/{job_id}/curve.csv", 
+            "csv_dir_url": f"/file/{job_id}/rve_csv/", 
+            **result
+        })
+        
     except HTTPException:
         raise
     except Exception as e:

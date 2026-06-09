@@ -26,10 +26,12 @@ numpy==2.4.6
 opt_einsum==3.4.0
 optree==0.19.1
 packaging==26.2
+pillow==12.2.0
 protobuf==7.35.0
 pydantic==2.13.4
 pydantic_core==2.46.4
 Pygments==2.20.0
+python-multipart==0.0.32
 requests==2.34.2
 rich==15.0.0
 scikit-learn==1.9.0
