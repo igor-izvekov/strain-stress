@@ -56,6 +56,16 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 hybrid_model = None
 
 def load_hybrid_model(model_dir: str):
+    """
+    Загружает гибридную модель CNN-GPR и скалеры из указанной директории.
+    
+    Args:
+        model_dir (str): Путь к папке с файлами модели.
+        
+    Returns:
+        dict: Словарь с компонентами модели ('cnn', 'gpr_heads', 'scaler_feat', 'scaler_tgt') 
+              или None в случае ошибки.
+    """
     if not ML_AVAILABLE:
         return None
     try:
@@ -79,6 +89,16 @@ if ML_AVAILABLE and os.path.exists(MODEL_DIR):
     hybrid_model = load_hybrid_model(MODEL_DIR)
 
 def min_distance_between_segments(p1, p2, q1, q2):
+    """
+    Вычисляет минимальное евклидово расстояние между двумя отрезками в 3D пространстве.
+    
+    Args:
+        p1, p2 (np.array): Конечные точки первого отрезка.
+        q1, q2 (np.array): Конечные точки второго отрезка.
+        
+    Returns:
+        float: Минимальное расстояние между отрезками.
+    """
     u, v, w = p2 - p1, q2 - q1, p1 - q1
     a, b, c = np.dot(u,u), np.dot(u,v), np.dot(v,v)
     d, e = np.dot(u,w), np.dot(v,w)
@@ -91,8 +111,22 @@ def min_distance_between_segments(p1, p2, q1, q2):
     return np.linalg.norm((p1 + s*u) - (q1 + t*v))
 
 class Fiber:
+    """
+    Класс, представляющий одно волокно в 3D пространстве.
+    Хранит геометрию (центр, направление, длину) и методы для проверки коллизий.
+    """
     __slots__ = ('center', 'radius', 'dir', 'length', 'half_len', 'p1', 'p2')
+    
     def __init__(self, center, radius, polar_deg, azimuth_deg):
+        """
+        Инициализирует волокно по центру, радиусу и углам ориентации.
+        
+        Args:
+            center (list): Координаты центра [x, y, z].
+            radius (float): Радиус волокна.
+            polar_deg (float): Полярный угол в градусах.
+            azimuth_deg (float): Азимутальный угол в градусах.
+        """
         self.center = np.array(center, dtype=float)
         self.radius = radius
         pr, az = math.radians(polar_deg), math.radians(azimuth_deg)
@@ -104,7 +138,17 @@ class Fiber:
         
     @classmethod
     def from_endpoints(cls, p1, p2, radius):
-        """Создание волокна по двум конечным точкам (для соединения срезов)."""
+        """
+        Создает объект волокна, соединяющего две заданные точки (используется для реконструкции по срезам).
+        
+        Args:
+            p1 (np.array): Начальная точка.
+            p2 (np.array): Конечная точка.
+            radius (float): Радиус волокна.
+            
+        Returns:
+            Fiber: Новый объект волокна.
+        """
         p1 = np.array(p1, dtype=float)
         p2 = np.array(p2, dtype=float)
         center = (p1 + p2) / 2.0
@@ -126,15 +170,37 @@ class Fiber:
         return obj
 
     def update_endpoints(self):
+        """Пересчитывает координаты концов волокна (p1, p2) на основе текущего центра и направления."""
         self.p1 = self.center - self.half_len * self.dir
         self.p2 = self.center + self.half_len * self.dir
         
     def check_collision(self, other, tol=1e-4):
+        """
+        Проверяет наличие коллизии (пересечения) с другим волокном.
+        
+        Args:
+            other (Fiber): Другое волокно для проверки.
+            tol (float): Допуск для определения пересечения.
+            
+        Returns:
+            bool: True, если волокна пересекаются.
+        """
         if np.linalg.norm(self.center - other.center) > self.length + other.length + 2*self.radius:
             return False
         return min_distance_between_segments(self.p1, self.p2, other.p1, other.p2) < (self.radius + other.radius - tol)
 
 def resolve_collisions_fast(fibers, bounds, radius, max_iter=80, tol=1e-4):
+    """
+    Алгоритм разрешения коллизий между волокнами методом пространственного хеширования (grid-based).
+    Сдвигает пересекающиеся волокна друг от друга до достижения допустимого зазора.
+    
+    Args:
+        fibers (list): Список объектов Fiber.
+        bounds (tuple): Границы области (xmin, xmax, ymin, ymax).
+        radius (float): Радиус волокна.
+        max_iter (int): Максимальное количество итераций.
+        tol (float): Допустимая величина перекрытия.
+    """
     n = len(fibers)
     if n < 2: return
     xmin, xmax, ymin, ymax = bounds
@@ -174,12 +240,17 @@ def resolve_collisions_fast(fibers, bounds, radius, max_iter=80, tol=1e-4):
         if not moved or max_ov < tol: break
 
 class FiberGenerator:
+    """
+    Генератор случайного распределения волокон с заданным объемным содержанием (Vf).
+    Использует гексагональную решетку с джиттером и алгоритмом разрешения коллизий.
+    """
     def __init__(self, radius, target_vf, max_pol, az_var):
         self.radius, self.target_vf = radius, target_vf/100.0
         self.max_pol, self.az_var = max_pol, az_var
         self.spacing = 2 * radius * 1.005
         
     def _hex_positions(self, jitter=0.0):
+        """Генерирует позиции центров волокон на основе гексагональной упаковки."""
         pos, dx = [], self.spacing
         dy = dx * math.sqrt(3) / 2.0
         for i in range(int(SIZE_X/dx)+3):
@@ -195,6 +266,12 @@ class FiberGenerator:
         return pos
         
     def generate(self):
+        """
+        Основной метод генерации. Создает список волокон, разрешает коллизии и возвращает их вместе с фактическим Vf.
+        
+        Returns:
+            tuple: (list[Fiber], float) — список волокон и фактический процент объема.
+        """
         n_req = max(1, int(round(self.target_vf * SIZE_X*SIZE_Y / (math.pi * self.radius**2))))
         pos = []
         for jt in [0.0, 0.3, 0.6, 1.0, 1.5]:
@@ -220,6 +297,19 @@ class FiberGenerator:
         return fibers, actual_vf
 
 def rasterize_fibers_to_density_fast(fibers, shape, radius, size):
+    """
+    Преобразует геометрическое описание волокон в 3D-массив плотности (воксельную сетку).
+    Использует векторизованные операции NumPy для высокой скорости.
+    
+    Args:
+        fibers (list): Список объектов Fiber.
+        shape (tuple): Размеры сетки (nx, ny, nz).
+        radius (float): Радиус волокна.
+        size (tuple): Физические размеры области (sx, sy, sz).
+        
+    Returns:
+        np.ndarray: 3D-массив плотности от 0.0 до 1.0.
+    """
     nx, ny, nz = shape
     sx, sy, sz = size[0]/nx, size[1]/ny, size[2]/nz
     bw = min(sx, sy, sz)
@@ -245,6 +335,16 @@ def rasterize_fibers_to_density_fast(fibers, shape, radius, size):
     return np.clip(density, 0.0, 1.0)
 
 def find_fiber_centers(image_path):
+    """
+    Обрабатывает 2D-изображение среза композита и находит центры всех волокон.
+    Использует бинаризацию по методу Отсу и морфологические операции.
+    
+    Args:
+        image_path (str): Путь к файлу изображения.
+        
+    Returns:
+        list: Список кортежей (x, y) физических координат центров.
+    """
     img = Image.open(image_path).convert('L')
     arr = np.array(img)
     
@@ -289,7 +389,17 @@ def find_fiber_centers(image_path):
     return centers
 
 def match_centers(centers_a, centers_b):
-    """Жадное сопоставление центров между двумя срезами по минимальному расстоянию."""
+    """
+    Сопоставляет центры волокон между начальным и конечным срезом.
+    Использует жадный алгоритм для минимизации суммарного расстояния между парами.
+    
+    Args:
+        centers_a (list): Центры на первом срезе.
+        centers_b (list): Центры на втором срезе.
+        
+    Returns:
+        list: Список пар ((xa, ya), (xb, yb)).
+    """
     dists = []
     for i, (xa, ya) in enumerate(centers_a):
         for j, (xb, yb) in enumerate(centers_b):
@@ -306,6 +416,18 @@ def match_centers(centers_a, centers_b):
     return pairs
 
 def run_inference(density_3d: np.ndarray, vf_target: float, n_samples: int = None):
+    """
+    Выполняет предсказание механических свойств с помощью гибридной модели CNN-GPR.
+    Рассчитывает кривую напряжение-деформация и статистические basis values (A/B-basis).
+    
+    Args:
+        density_3d (np.ndarray): 3D-массив плотности RVE.
+        vf_target (float): Целевой объемный процент волокна.
+        n_samples (int, optional): Количество выборок для расчета k-факторов.
+        
+    Returns:
+        dict: Результаты предсказания (кривые, basis values, статистика).
+    """
     if not ML_AVAILABLE or hybrid_model is None:
         return predict_properties_fallback(vf_target)
     try:
@@ -362,6 +484,16 @@ def run_inference(density_3d: np.ndarray, vf_target: float, n_samples: int = Non
         return predict_properties_fallback(vf_target)
 
 def predict_properties_fallback(vf_target: float):
+    """
+    Резервный метод расчета свойств на основе аналитической физической модели (правило смесей).
+    Используется, если ML-модель недоступна.
+    
+    Args:
+        vf_target (float): Объемный процент волокна.
+        
+    Returns:
+        dict: Результаты расчета (кривые, basis values).
+    """
     vf = vf_target / 100.0
     E_comp = vf * E_fiber_1 + (1-vf) * E_matrix
     sigma_ult = (vf * fiber_tensile_strength_1 * 0.85 + (1-vf) * 90.0 * 0.3)
@@ -410,6 +542,7 @@ def predict_properties_fallback(vf_target: float):
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
+    """Возвращает главную HTML-страницу интерфейса."""
     index_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html")
     if not os.path.exists(index_path):
         return HTMLResponse(content="<h1>❌ index.html не найден</h1><p>Положите файл index.html в папку с main.py</p>", status_code=404)
@@ -418,7 +551,10 @@ async def root():
 
 @app.post("/predict/")
 async def predict(vf_target: float = Form(60.0)):
-    """Эндпоинт 1: Генерация RVE и инференс по заданному объему волокна (Vf)."""
+    """
+    Эндпоинт 1: Генерация RVE и инференс по заданному объему волокна (Vf).
+    Создает случайное распределение волокон, растеризует его и запускает ML-предсказание.
+    """
     job_id = str(uuid.uuid4())
     job_dir = os.path.join(TEMP_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
@@ -460,7 +596,10 @@ async def predict(vf_target: float = Form(60.0)):
 
 @app.post("/predict/from_slices/")
 async def predict_from_slices(slice_a: UploadFile = File(...), slice_b: UploadFile = File(...)):
-    """Эндпоинт 2: Генерация RVE по двум микроснимкам (начальный и конечный срезы)."""
+    """
+    Эндпоинт 2: Генерация RVE по двум микроснимкам (начальный и конечный срезы).
+    Находит центры волокон на изображениях, соединяет их в 3D-структуру и запускает инференс.
+    """
     job_id = str(uuid.uuid4())
     job_dir = os.path.join(TEMP_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
@@ -526,6 +665,7 @@ async def predict_from_slices(slice_a: UploadFile = File(...), slice_b: UploadFi
 
 @app.get("/file/{job_id}/{filename:path}")
 async def serve_file(job_id: str, filename: str):
+    """Сервирует сгенерированные файлы (CSV, метаданные) клиенту."""
     path = os.path.join(TEMP_DIR, job_id, filename)
     if not os.path.exists(path):
         raise HTTPException(404, "Файл не найден")

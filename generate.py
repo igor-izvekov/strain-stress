@@ -53,7 +53,14 @@ TARGET_POINTS = 200
 ODB_PATH = os.path.join(os.getcwd(), JOB_NAME + '.odb')
 STRESS_CSV = os.path.join(os.getcwd(), 'strain_stress.csv')
 
+
+
 def min_distance_between_segments(p1, p2, q1, q2):
+    """
+    Вычисляет кратчайшее расстояние между двумя 3D-отрезками (p1-p2 и q1-q2).
+    Использует параметрические уравнения прямых. Возвращаемые параметры s и t 
+    ограничиваются диапазоном [0, 1], чтобы точка всегда лежала на отрезке, а не на прямой.
+    """
     u = p2 - p1
     v = q2 - q1
     w = p1 - q1
@@ -109,10 +116,18 @@ class Fiber:
         self.p2 = self.center + self.half_len * self.dir
 
     def update_endpoints(self):
+        """
+        Пересчитывает координаты концов волокна (p1, p2) на основе его текущего центра. 
+        Вызывается после каждого смещения центра в процессе разрешения коллизий.
+        """
         self.p1 = self.center - self.half_len * self.dir
         self.p2 = self.center + self.half_len * self.dir
 
     def check_collision(self, other, tolerance=1e-4):
+        """
+        Проверяет пересечение двух волокон. Использует быструю отсечку по расстоянию 
+        между центрами, а затем точный расчет минимальной дистанции между 3D-отрезками.
+        """
         center_dist = np.linalg.norm(self.center - other.center)
         max_dist = self.length + other.length + self.radius + other.radius
         if center_dist > max_dist:
@@ -120,7 +135,16 @@ class Fiber:
         d = min_distance_between_segments(self.p1, self.p2, other.p1, other.p2)
         return d < (self.radius + other.radius - tolerance)
 
+
+
 def resolve_collisions_fast(fibers, bounds, radius, max_iter=80, tol=1e-4):
+    """
+    Алгоритм пространственного хеширования (spatial hashing) для быстрого разрешения пересечений волокон.
+    Вместо проверки всех пар O(N^2), пространство разбивается на ячейки (cell_size). 
+    Проверка коллизий выполняется только для волокон в соседних ячейках (3x3 grid).
+    При обнаружении пересечения центры волокон раздвигаются пропорционально величине перекрытия (overlap).
+    """
+
     n = len(fibers)
     if n < 2: return
     xmin, xmax, ymin, ymax = bounds
@@ -182,6 +206,20 @@ def resolve_collisions_fast(fibers, bounds, radius, max_iter=80, tol=1e-4):
         if not moved or max_ov < tol:
             break
 
+
+# ============================================================================
+# АЛГОРИТМ HcMRSM: Генерация микроструктуры
+# ============================================================================
+# Реализует алгоритм HcMRSM (Hexagonal Close-packed Modified Random Sequential 
+# Method) для создания непериодической микроструктуры композита:
+# 1. Инициализация параметров (SIZE, RADIUS, VF_TARGET)
+# 2. Расчет требуемого числа волокон N
+# 3. Генерация начальных позиций (Hexagonal Lattice + Jitter)
+# 4. Назначение ориентации (Azimuth, Polar angles)
+# 5. Разрешение коллизий через Spatial Hash Grid
+# 6. Проверка итоговой объемной доли (VF)
+# Выход: Список непересекающихся волокон (Fiber Objects)
+# ============================================================================
 class FiberGenerator:
     def __init__(self, radius, target_vf, max_pol, az_var):
         self.radius = radius
@@ -189,8 +227,13 @@ class FiberGenerator:
         self.max_pol = max_pol
         self.az_var = az_var
         self.spacing = 2 * radius * 1.005
-
+    
+   
     def _hex_positions(self, jitter=0.0):
+        """
+        Генерирует базовые позиции центров волокон в виде гексагональной решетки 
+        с добавлением случайного смещения (jitter) для избежания идеальной периодичности.
+        """
         positions = []
         dx = self.spacing
         dy = self.spacing * math.sqrt(3) / 2.0
@@ -212,6 +255,12 @@ class FiberGenerator:
         return positions
 
     def generate(self):
+        """
+        Основной метод генерации: рассчитывает требуемое число волокон, 
+        создает гексагональную решетку со случайным смещением (jitter), 
+        назначает углы ориентации (с подавлением наклона у краев) 
+        и запускает алгоритм разрешения коллизий.
+        """
         n_req = max(1, int(round(self.target_vf * (SIZE_X*SIZE_Y*SIZE_Z) /  
                                  (math.pi * self.radius**2 * SIZE_Z))))
         print("Target fiber count: {}".format(n_req))
@@ -255,6 +304,10 @@ class FiberGenerator:
         return fibers, actual_vf
 
 def collect_metadata(actual_vf, density):
+    """
+    Собирает геометрические параметры РЭ, свойства материалов и статистику 
+    растеризованной плотности в единый словарь для логирования и сохранения.
+    """
     return {
         'size_x_mm': SIZE_X, 'size_y_mm': SIZE_Y, 'size_z_mm': SIZE_Z,
         'raster_shape': CSV_SHAPE, 'fiber_radius_mm': FIBER_RADIUS,
@@ -278,6 +331,29 @@ def collect_metadata(actual_vf, density):
         'fiber_fracture_energy_GJm2': fiber_fracture_energy,
     }
 
+
+
+# ============================================================================
+# АЛГОРИТМ РАСТЕРИЗАЦИИ: Преобразование геометрии в воксельную сетку
+# ============================================================================
+# Вход: Список волокон, Размеры сетки (100x100x100)
+# 1. Инициализация массива Density (zeros)
+# 2. Генерация Meshgrid координат центров вокселей (X,Y,Z)
+# 3. Для каждого волокна F:
+#    - Векторизованный расчет расстояний
+#    - Проекция вокселей на ось волокна (proj)
+#    - Clip проекции по длине волокна (t)
+#    - Поиск ближайшей точки на оси (Closest Point)
+#    - Расчет квадрата расстояния: dist2 = |Voxel - Closest|^2
+#    - Классификация:
+#      * Внутри (dist2 <= R^2): val = 1.0
+#      * Граница (dist2 <= (R+border)^2): Anti-aliasing, val = 1.0 - (sqrt(dist2)-R)/border
+#      * Снаружи: val = 0.0
+#    - Аккумуляция: Density += val
+# 4. Clip(Density, 0, 1)
+# 5. Сохранение слоев в CSV и метаданных
+# Выход: 3D массив плотности и CSV-файлы
+# ============================================================================
 def rasterize_fibers_to_density_fast(fibers, shape, radius, size):
     nx, ny, nz = shape
     sx, sy, sz = size[0]/nx, size[1]/ny, size[2]/nz
@@ -321,6 +397,11 @@ def rasterize_fibers_to_density_fast(fibers, shape, radius, size):
     return density
 
 def save_csv_from_density(density, output_dir, metadata_dict):
+    """
+    Сохраняет 3D-массив плотности по слоям (ось Z) в отдельные CSV-файлы 
+    и экспортирует словарь метаданных в файл metadata.csv.
+    """
+
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     nz = density.shape[2]
@@ -343,53 +424,102 @@ def save_csv_from_density(density, output_dir, metadata_dict):
     print("Mean density = {:.6f}".format(metadata_dict['mean_raster_density']))
 
 def create_model_and_inp(fibers):
+    """
+    Создание модели Abaqus и генерация INP-файла.
+    
+    Эта функция выполняет:
+    1. Создание геометрии матрицы и волокон
+    2. Назначение материалов (матрица с пластичностью и повреждением, ортотропные волокна)
+    3. Сборку компонентов с правильным позиционированием
+    4. Настройку embedded region для связи волокон с матрицей
+    5. Определение граничных условий и шага Explicit Dynamics
+    6. Запрос полей напряжений/деформаций и истории реакции
+    7. Запись INP-файла для последующего расчета
+    """
+
+    # Удаление существующей модели с таким именем (если есть)
     if MODEL_NAME in mdb.models: del mdb.models[MODEL_NAME]
     m = mdb.Model(name=MODEL_NAME)
     
+    # ЭТАП 1: СОЗДАНИЕ МАТРИЦЫ И НАЗНАЧЕНИЕ МАТЕРИАЛОВ
+
+    # --- 1.1. Геометрия матрицы (прямоугольный параллелепипед RVE) ---
     sk = m.ConstrainedSketch(name='MatSk', sheetSize=200)
     sk.rectangle((0,0), (SIZE_X, SIZE_Y))
     p_mat = m.Part(name='Matrix', dimensionality=THREE_D, type=DEFORMABLE_BODY)
     p_mat.BaseSolidExtrude(sketch=sk, depth=SIZE_Z)
 
+     # --- 1.2. Материал матрицы ---
+     # Упругие свойства (изотропные)
     mat_m = m.Material('Matrix')
     mat_m.Density(table=((density_matrix,),))
     mat_m.Elastic(table=((E_matrix, nu_matrix),))
+    
+    # Пластичность с изотропным упрочнени
     mat_m.Plastic(table=plastic_data, hardening=ISOTROPIC)
+
+     # Инициация вязкого разрушения (Ductile Damage)
     mat_m.DuctileDamageInitiation(table=ductile_damage_data, accumulationPower=damage_accumulation_power,
                                   rateDependency=OFF, temperatureDependency=OFF, dependencies=0)
+    
+    # Эволюция повреждения на основе энергии разрушения
     mat_m.ductileDamageInitiation.DamageEvolution(type=ENERGY, softening=LINEAR, degradation=MAXIMUM,
                                                    mixedModeBehavior=MODE_INDEPENDENT, modeMixRatio=ENERGY,
                                                   table=((fracture_energy,),), temperatureDependency=OFF, dependencies=0)
+    
+    # Сечение матрицы и назначение
     m.HomogeneousSolidSection(name='SecMat', material='Matrix')
     p_mat.SectionAssignment(region=p_mat.Set(cells=p_mat.cells, name='All'), sectionName='SecMat')
 
+     # --- 1.3. Материал волокон (ортотропный) ---
     mat_f = m.Material('Fiber')
     mat_f.Density(table=((density_fiber,),))
+
+    # Упругие константы инженерного типа (Engineering Constants)
     mat_f.Elastic(type=ENGINEERING_CONSTANTS,
                   table=((E_fiber_1 , E_fiber_2, E_fiber_3, nu_fiber_12, nu_fiber_13, nu_fiber_23,
                           G_fiber_12, G_fiber_13, G_fiber_23),))
+    
+    # Инициация повреждения по максимальным напряжениям (Maxs Damage)
     mat_f.MaxsDamageInitiation(
         table=((4900.0, 1400.0,  50.0, 150.0, 90.0, 50.0),),
         rateDependency=OFF, temperatureDependency=OFF, dependencies=0
     )
+    
+    # Эволюция повреждения волокон
     mat_f.maxsDamageInitiation.DamageEvolution(type=ENERGY, softening=LINEAR, degradation=MAXIMUM,
                                                mixedModeBehavior=MODE_INDEPENDENT, modeMixRatio=ENERGY,
                                                table=((fiber_fracture_energy,),), temperatureDependency=OFF, dependencies=0)
+    
+    # Сечение волокон
     m.HomogeneousSolidSection(name='SecFib', material='Fiber')
 
+    
+    # ЭТАП 2: СБОРКА (ASSEMBLY) И ПОЗИЦИОНИРОВАНИЕ ВОЛОКОН
+    
     ass = m.rootAssembly
+
+    # --- 2.1. Экземпляр матрицы ---
     ass.Instance(name='MatInst', part=p_mat, dependent=ON)
 
+    # Тип элементов: C3D8R (8-узловой гексаэдр с редуцированным интегрированием)
+    # elemDeletion=ON позволяет удалять элементы при полном повреждении
     el_type = mesh.ElemType(elemCode=C3D8R, elemLibrary=EXPLICIT, elemDeletion=ON, hourglassControl=ENHANCED)
 
+    # --- 2.2. Создание и позиционирование каждого волокна ---
     for i, f in enumerate(fibers):
         pn, sn = 'FibP_{}'.format(i), 'FibSk_{}'.format(i)
+
+        # Геометрия волокна (цилиндр)
         fs = m.ConstrainedSketch(name=sn, sheetSize=10)
         fs.CircleByCenterPerimeter(center=(0,0), point1=(FIBER_RADIUS, 0))
         fp = m.Part(name=pn, dimensionality=THREE_D, type=DEFORMABLE_BODY)
         fp.BaseSolidExtrude(sketch=fs, depth=f.length)
+
+        # Назначение сечения
         fp.SectionAssignment(region=fp.Set(cells=fp.cells, name='All'), sectionName='SecFib')
         
+        # --- 2.3. ЛОКАЛЬНАЯ СИСТЕМА КООРДИНАТ И ОРИЕНТАЦИЯ ---
         csys_feature = fp.DatumCsysByDefault(CARTESIAN)
         fp.MaterialOrientation(
             region=fp.Set(cells=fp.cells, name='All'), 
@@ -400,47 +530,74 @@ def create_model_and_inp(fibers):
             angle=0.0
         )
         
+        # Сетка волокна
         fp.seedPart(size=1.5, deviationFactor=0.1)
         fp.setElementType(regions=(fp.cells,), elemTypes=(el_type,))
         fp.generateMesh()
         
+        # --- 2.4. ПОЗИЦИОНИРОВАНИЕ В СБОРКЕ ---
         iname = 'FibI_{}'.format(i)
         ass.Instance(name=iname, part=fp, dependent=ON)
+
+        # Поворот волокна для совмещения с направлением dir
+        # Вектор оси поворота: перекрестное произведение [0,0,1] и dir
         za = np.array([0,0,1])
         ra = np.cross(za, f.dir)
         nr = np.linalg.norm(ra)
         if nr  > 1e-12:
             ra /= nr
+            # Угол между Z и направлением волокна
             ang = math.degrees(math.acos(np.clip(np.dot(za, f.dir), -1.0, 1.0)))
             ass.rotate(instanceList=(iname,), axisPoint=(0,0,0), axisDirection=tuple(ra), angle=ang)
+        # Перемещение в точку центра
         ass.translate(instanceList=(iname,), vector=(f.center[0], f.center[1], f.center[2] - f.length/2.0))
 
+    # --- 2.5. Преобразование зависимых экземпляров в независимые ---
+    # Необходимо для meshing и embedded region
     for inst in ass.instances.values():
         if 'FibI_' in inst.name:
             ass.makeIndependent(instances=(inst,))
     ass.regenerate()
 
+
+    # ЭТАП 3: СВЯЗЬ ВОЛОКОН И МАТРИЦЫ (EMBEDDED REGION)
+
+    # Хост-регион: вся матрица
     host = ass.Set(cells=ass.instances['MatInst'].cells, name='HostRegion')
+
+    # Embedded-регионы: каждое волокно
+    # Степени свободы узлов волокон интерполируются из матрицы
     for i in range(len(fibers)):
         inst = ass.instances['FibI_{}'.format(i)]
         fr = ass.Set(cells=inst.cells, name='FibSet_{}'.format(i))
         m.EmbeddedRegion(name='Emb_{}'.format(i), embeddedRegion=fr, hostRegion=host, absoluteTolerance=0.9)
 
+
+    # ЭТАП 4: СЕТКА МАТРИЦЫ
+
     p_mat.seedPart(size=2.0, deviationFactor=0.1)
     p_mat.setElementType(regions=(p_mat.cells,), elemTypes=(el_type,))
     p_mat.generateMesh()
 
+    # Сохранение CAE-файла
     mdb.saveAs(pathName=os.path.join(os.getcwd(), CAE_FILE))
     print("CAE saved: {}".format(CAE_FILE))
 
+
+    # ЭТАП 5: ГРАНИЧНЫЕ УСЛОВИЯ И НАГРУЖЕНИЕ
+
+    # --- 5.1. Reference Point на верхней грани ---
     print("Creating Reference Point at top face center...")
     rp_feature = ass.ReferencePoint(point=(SIZE_X/2.0, SIZE_Y/2.0, SIZE_Z))
     rp_obj = ass.referencePoints[rp_feature.id]
     rp_set = ass.Set(referencePoints=(rp_obj,), name='rp')
 
+    # --- 5.2. Поверхность верхней грани ---
     top_faces = ass.instances['MatInst'].faces.findAt(((SIZE_X/2.0, SIZE_Y/2.0, SIZE_Z), ))
     ass.Surface(name='TopFaceSurface', side1Faces=top_faces)
 
+    # --- 5.3. Coupling: связь RP с верхней гранью ---
+    # KINEMATIC coupling обеспечивает жесткое связывание всех степеней свободы
     m.Coupling(name='rp_coupling', 
                controlPoint=ass.sets['rp'], 
                surface=ass.surfaces['TopFaceSurface'], 
@@ -448,13 +605,19 @@ def create_model_and_inp(fibers):
                influenceRadius=WHOLE_SURFACE,
                 u1=ON, u2=ON, u3=ON, ur1=ON, ur2=ON, ur3=ON)
 
+    # --- 5.4. Закрепление нижней грани ---
     bottom_faces = ass.instances['MatInst'].faces.findAt(((SIZE_X/2.0, SIZE_Y/2.0, 0.0), ))
     ass.Set(faces=bottom_faces, name='BottomFace')
     m.EncastreBC(name='BC-1_Stop', createStepName='Initial', region=ass.sets['BottomFace'])
 
+    # --- 5.5. Начальное закрепление RP ---
     m.DisplacementBC(name='BC_RP', createStepName='Initial', region=ass.sets['rp'], 
                      u1=0, u2=0, u3=0, ur1=0, ur2=0, ur3=0)
 
+    
+    # ЭТАП 6: ШАГ ANALYSIS (EXPLICIT DYNAMICS)
+
+    # Явный динамический шаг с геометрической нелинейностью
     m.ExplicitDynamicsStep(
         name='Step-1', 
         previous='Initial', 
@@ -462,19 +625,37 @@ def create_model_and_inp(fibers):
         timePeriod=STEP_TIME, 
         nlgeom=ON, 
         adiabatic=OFF, 
+        # Масс-масштабирование для ускорения квазистатического расчета
         massScaling=((SEMI_AUTOMATIC, MODEL, AT_BEGINNING, 0, 1e-03, BELOW_MIN, 0, 0, 0, 0, 0, GLOBAL_NONE),)
     )
 
+    # Амплитуда нагрузки (Smooth Step для плавного нарастания)
     m.SmoothStepAmplitude(name='AmpD', timeSpan=STEP, data=((0.0, 0.0), (STEP_TIME, 1.0)))
     
+    # --- 5.6. Приложение перемещения к RP --
     target_displacement = 15.0 
     m.boundaryConditions['BC_RP'].setValuesInStep(stepName='Step-1', amplitude='AmpD', u3=target_displacement)
 
+
+    # ЭТАП 7: ЗАПРОСЫ РЕЗУЛЬТАТОВ
+
+    # Полевые выводы (каждые 10 инкрементов)
     field_output = m.fieldOutputRequests['F-Output-1']
     field_output.setValuesInStep(stepName='Step-1', 
                                  frequency=10, 
-                                 variables=('S', 'SVAVG', 'PE', 'PEVAVG', 'PEEQ', 'PEEQVAVG', 'LE', 'U', 'V', 'A', 'RF', 'CSTRESS', 'EVF', 'STATUS', 'SDEG', 'SDV', 'ENER'))
+                                 variables=('S', 'SVAVG',                           # Напряжения
+                                            'PE', 'PEVAVG', 'PEEQ', 'PEEQVAVG',     # Пластические деформации
+                                            'LE',                                   # Логарифмические деформации 
+                                            'U', 'V', 'A',                          # Перемещения, скорости, ускорения
+                                            'RF',                                   # Реактивные силы
+                                            'CSTRESS',                              # Контактные напряжения
+                                            'EVF',                                  # Объемная доля элементов
+                                            'STATUS',                               # Статус элемента (удален/активен)
+                                            'SDEG',                                 # Степень повреждения (0-1)
+                                            'SDV',                                  # Переменные состояния
+                                            'ENER'))                                # Энергии
 
+    # История вывода для RP (500 точек)
     m.HistoryOutputRequest(
         name='H-Output-RP',
         createStepName='Step-1',
@@ -483,11 +664,20 @@ def create_model_and_inp(fibers):
         numIntervals=500 
     )
 
+    # ЭТАП 8: ЗАПИСЬ INP-ФАЙЛА
     j = mdb.Job(name=JOB_NAME, model=MODEL_NAME, type=ANALYSIS)
     j.writeInput()
     print("Input file created: {}.inp".format(JOB_NAME))
 
 def extract_results():
+    """
+    Извлечение результатов из ODB-файла:
+    1. Чтение истории перемещения (U3) и реакции (RF3) на Reference Point.
+    2. Расчет инженерных деформаций (strain = U3 / SIZE_Z) и напряжений (stress = RF3 / Area).
+    3. Обрезка пост-пикового шума: данные обрезаются через 5% после достижения максимального напряжения, 
+       чтобы исключить артефакты динамического разрушения в Explicit.
+    4. Прореживание (downsampling) до TARGET_POINTS точек для компактного CSV-файла.
+    """
     if not os.path.exists(ODB_PATH):
         raise FileNotFoundError("ODB not found. Run the job first: abaqus job={} interactive".format(JOB_NAME))
     
